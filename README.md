@@ -8,7 +8,7 @@ All data science tasks that have a density based approach can be tackled using t
 
 MCDE works in both python 2 and python 3. It requires: numpy, scipy, mcint and sklearn.
 
-In order to import the main class just copy the file [MCDE.py](./MCDE.py) **link to file in github** to your working directory and add on top of your python file:
+In order to import the main class just copy the file [MCDE.py](./MCDE.py) to your working directory and add on top of your python file:
 
 ```
 from MCDE import MCDensityEstimator
