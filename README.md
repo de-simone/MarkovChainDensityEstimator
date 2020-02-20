@@ -26,7 +26,8 @@ from MCDE import MCDensityEstimator
 
 ### Usage
 
-An example of possible usage is in the repository file [example.ipynb](./example.ipynb) **link to file in github**. Here we have showed how to estimate the PDF in a 1D and a 2D example, including the optimization phase necessary to choose the parameter of our estimator. A qualitative comparison with the true PDF is also shown.
+An example of possible usage is in the Jupyter notebook [example.ipynb](./example.ipynb) **link to file in github**. 
+There you can find how to estimate the PDF in a 1D and a 2D example, including the optimization phase necessary to choose the parameter of our estimator. A qualitative comparison with the true PDF is also shown.
 
 ### License
 
