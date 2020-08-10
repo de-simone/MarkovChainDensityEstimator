@@ -3,73 +3,104 @@
 #
 # Copyright (c) 2020: Andrea De Simone, Alessandro Morandini.
 
+from __future__ import division
 import numpy as np
+import math
 import scipy
 import os
 import mcint
-from sklearn.preprocessing import normalize
-import random
+from sklearn.neighbors import  KernelDensity
 
+import random
+from mpmath import hyp1f2
 
 
 class MCDensityEstimator(object):
     """
-    Density estimator using Markov Chains.
+    Density estimator using Markov Chains (optimized by using connection with KDE)
     """
 
     def __init__( self,
-                  weight_func='exp2',
-                  beta=1.0,
-                  max_iter=10000,
-                  rtol = 1e-12,
-                  interpolation_method='nearest',
-                  metric='euclidean'
+                  weight_func='gaussian',
+                  bw=1.0,
+                  interpolation_method='linear',
+                  metric='euclidean',
+                  normalize=True,
+                  mov_bias=1.,
+                  vol_ext=0,
+                  kde_tol=1e-4
                   ):
-        """
-        Initialize instance of the estimator class.
-
-        X: input data set
-        weight_func: weighting function. Possible choices:
-                    'exp': exp(-beta*d)
-                    'exp2': exp(-beta*d^2)
-        beta: distance-weighting parameter of the exponential.
-        max_iter: max number of iterations
-        rtol: relative tolerance to find principal eigenvalue = 1.0
-        interpolation_method: interpolation used to normalize the PDF and predict values (nearest or linear)
-        metric: distances are calculated based on this distance measure
-                    (see scipy.spatial.distance.pdist for the available metrics)
-        """
 
         self.weight_func = weight_func
-        self.beta = beta
-        self.max_iter = max_iter
-        self.rtol = rtol
+        self.bw = bw
         self.interpolation_method=interpolation_method
         self.metric=metric
+        self.vol_ext=vol_ext
+        self.kde_tol=kde_tol
+        self.normalize=normalize
+        self.mov_bias=mov_bias
 
-        #assert self.prec >=1  , "Invalid argument. prec must be >=1."
-        assert self.beta > 0.0, "Invalid argument. beta must be positive."
-        assert self.max_iter >= 1, "Invalid argument. max_iter must be >= 1."
-        assert self.rtol > 0.0 , "Invalid argumento. rtol must be positive."
+
+
+        assert self.bw > 0.0, "Invalid argument. bw must be positive."
+        assert self.vol_ext >= 0.0, "Invalid argument. vol_ext must be non negative."
+        assert self.kde_tol > 0.0, "Invalid argument. kde_tol must be positive."
+
 
     def get_params(self, deep=True):
         return {"weight_func": self.weight_func,
-                "beta": self.beta, "max_iter":self.max_iter,
-                "rtol": self.rtol,"interpolation_method": self.interpolation_method, "metric": self.metric}
+                "bw": self.bw, "interpolation_method": self.interpolation_method, "metric": self.metric,
+                "kde_tol": self.kde_tol, "vol_ext": self.vol_ext, "normalize": self.normalize,
+                "mov_bias":self.mov_bias}
 
     def set_params(self, **parameters):
         for parameter, value in parameters.items():
             setattr(self, parameter, value)
         return self
+    
+    # calculate the translation term K(0)/Nh^D
+    def trasl(self):
+        
+        if self.weight_func == 'gaussian':
+            fac=(1/(2*math.pi))**(self.D/2.)
+            return(fac/(self.N*self.bw**self.D))
+        
+        elif self.weight_func == 'exponential':
+            fac=scipy.special.gamma(self.D+1.)*math.pi**(self.D/2.)/scipy.special.gamma(self.D/2.+1)
+            return(1/(fac*self.N*self.bw**self.D))
+
+        elif self.weight_func == 'epanechnikov':
+            fac=(2./(self.D+2.))*math.pi**(self.D/2.)/scipy.special.gamma(self.D/2.+1)
+            return(1/(fac*self.N*self.bw**self.D))
+        
+        elif self.weight_func == 'tophat':
+            fac=math.pi**(self.D/2.)/scipy.special.gamma(self.D/2+1)
+            return(1/(fac*self.N*self.bw**self.D))
+        
+        elif self.weight_func == 'linear':
+            fac=(1./(self.D+1.))*math.pi**(self.D/2.)/scipy.special.gamma(self.D/2.+1.)
+            return(1/(fac*self.N*self.bw**self.D))
+        
+        # does not work for even D
+        elif self.weight_func == 'cosine':
+            print('The cosine Kernel might have issues for even number of features\n')
+            fac=np.float(hyp1f2(0.5+(self.D-1.)/2.,0.5,1.5+(self.D-1.)/2.,-math.pi**2/16.))*math.pi**(self.D/2.)/scipy.special.gamma(self.D/2.+1.)
+            return(1/(fac*self.N*self.bw**self.D))
+        
+    
+    # KDE is implemented through scikit-learn
+    def kdefit(self):
+        self.kde=KernelDensity(kernel=self.weight_func, bandwidth=self.bw, rtol=self.kde_tol).fit(self.x)
+
+    # prob_kde returns the PDF estimated with KDE    
+    def prob_kde( self, y):
+        return(np.exp(self.kde.score_samples(np.array([y]).reshape(-1,self.D))))
+    
+    # function to be integrated in the case the KDE-extension is used
+    def int_kde(self, y):
+        return(self.prob_kde(y)-self.btrasl)*np.heaviside(self.prob_kde(y)-self.btrasl,0)
 
     def fit( self , X):
-        """
-        Compute the NxN matrices:
-        Distance matrix (self.d_matrix),
-        Weight matrix (self.W_matrix),
-        Transition probability matrix (self.Q_matrix)
-        """
-
         #array must always be at least 2D to compute distance matrices
         self.x = np.asarray(X)
         if self.x.flatten().shape[0]/self.x.shape[0] == 1:
@@ -80,134 +111,82 @@ class MCDensityEstimator(object):
         # Dimensionality of points
         self.D = self.x.shape[1]
 
-        #---
-        #print("Computing matrices ...", end=' ')
+        self.kdefit()
+        self.btrasl=self.mov_bias*self.trasl()
+        
+        self.pi=self.prob_kde(self.x)-self.btrasl
+        
+        # normalize is an handle that can turn off normalization
+        if self.normalize:
+            self.estimate_pdf()
+    
 
-        # Compute Distance matrix
-        self.d_matrix = scipy.spatial.distance.squareform(
-                            scipy.spatial.distance.pdist(
-                                                    self.x,
-                                                    metric=self.metric) )
+    def estimate_pdf( self ):
+        # Un-normalized estimated probability density
+        self.pdf=self.pi
 
-        # Compute Weight matrix
-        if self.weight_func == 'exp':
-            self.W_matrix = np.exp(-self.d_matrix*self.beta)
+        # Normalization through KDE-extension                  
+        if self.interpolation_method=='kde':         
+            self.integral, _ = mcint.integrate(self.int_kde,
+                                                    self.sampler(),
+                                                    measure=self.volume(),
+                                                    n=200000 )
 
-        elif self.weight_func == 'exp2':
-            self.W_matrix = np.exp(-np.square(self.d_matrix)*self.beta)
 
 
         else:
-            print("invalid weight function")
+        # Normalization through an interpolation 
+            if self.D==1:
+                if self.interpolation_method=='linear':
+                    self.interp = scipy.interpolate.interp1d(
+                                                    self.x[:,0],
+                                                    self.pdf,
+                                                    fill_value=0.,
+                                                    kind=self.interpolation_method )
+                    ind=np.argsort(self.x,axis=0)[:,0]
 
-        # fill diagonal with 0
-        np.fill_diagonal(self.W_matrix, 0.0)
-
-
-        # Compute Transition probability matrix
-        # (Each row is normalized to 1)
-        self.Q_matrix = normalize(self.W_matrix, axis=1, norm='l1')
-
-        # Find stationary distribution (with power iteration method)
-        evec_found = False
-        Qt = np.transpose(self.Q_matrix)
-
-        # start with simple guess (normalized to sum to 1)
-        new_vec = np.mean(self.W_matrix,axis=0)
-        new_vec = new_vec / np.sum(new_vec)
-
-        # Loop over tolerances (each time it is increased by a factor of 10)
-        while self.rtol <= 1e-5:
-
-            # Loop of matrix*vector products
-            #  until |Principal Eigenvalue - 1| < self.rtol
-            for i in range(self.max_iter):
-
-                last_vec = np.copy(new_vec)
-
-                new_vec =  np.dot(Qt, last_vec)
-                new_vec = new_vec / np.sum(new_vec)
-                eigval = np.dot(last_vec, new_vec)/np.dot(last_vec, last_vec)
-
-                # stop when new vector is close to previous one
-                if np.isclose(eigval, 1.0, atol=self.rtol, rtol=0):
-                    evec_found = True
-                    break  # exit for loop
-
-            if evec_found:
-                self.pi = new_vec
-                self.estimate_pdf()
-                break  # exit while loop
-
-            else:
-                self.rtol = self.rtol * 10
-                if self.rtol <= 1e-3:
-                    print("\n  Run again with tolerance "
-                          + "increased to {:.0e}".format(self.rtol))
-
-        if not evec_found:
-            print("\nStationary distribution not "
-                       +"found after {:d} iterations".format(self.max_iter))
-            print("Increase max_iter.")
-            temp = os.system('say -v Samantha "run failed" ')
+                    self.integral=np.trapz(x=self.x[ind].flatten(),y=self.pdf[ind])
+                
+                elif self.interpolation_method=='nearest':
+                    self.interp = scipy.interpolate.interp1d(
+                                                    self.x[:,0],
+                                                    self.pdf,
+                                                    fill_value=0.,
+                                                    kind=self.interpolation_method )
+                    self.integral, _ = mcint.integrate( self.interp,
+                                                    self.sampler(),
+                                                    measure=self.volume(),
+                                                    n=200000 )
+                
+                else:
+                    print('Invalid norm func!\n\n')
 
 
 
-    def estimate_pdf( self ):
-        """
-        Estimated pdf at each data point, based on stationary
-        distribution distances
-        """
 
-        # Un-normalized estimated probability density
-        self.pdf = self.pi
+            elif self.D>=2:
 
-        # Normalization through an interpoaltion or to a specified number
-        if self.D==1:
-            if self.interpolation_method=='linear':
-                self.interp = scipy.interpolate.interp1d(
-                                                self.x[:,0],
-                                                self.pdf,
-                                                fill_value='extrapolate',
-                                                kind=self.interpolation_method )
-            elif self.interpolation_method=='nearest':
-                self.interp = scipy.interpolate.interp1d(
-                                                self.x[:,0],
-                                                self.pdf,
-                                                fill_value='extrapolate',
-                                                kind=self.interpolation_method )
-            else:
-                print('Invalid norm func!\n\n')
+                if self.interpolation_method=='linear':
+                    self.interp = scipy.interpolate.LinearNDInterpolator(
+                                            self.x, self.pdf, fill_value=0.0 )
+                elif self.interpolation_method=='nearest':
+                    self.interp = scipy.interpolate.NearestNDInterpolator(
+                                                            self.x, self.pdf )
+                else:
+                    print('Invalid norm func!\n\n')
 
-            self.integral, _ = mcint.integrate( self.interp,
-                                                self.sampler(),
-                                                measure=self.volume(),
-                                                n=100000 )
-
-
-        elif self.D>=2:
-
-            if self.interpolation_method=='linear':
-                self.interp = scipy.interpolate.LinearNDInterpolator(
-                                        self.x, self.pdf, fill_value=0.0 )
-            elif self.interpolation_method=='nearest':
-                self.interp = scipy.interpolate.NearestNDInterpolator(
-                                                        self.x, self.pdf )
-            else:
-                print('Invalid norm func!\n\n')
-
-            self.integral, _ = mcint.integrate( self.interp,
-                                                self.sampler(),
-                                                measure=self.volume(),
-                                                n=100000 )
+                self.integral, _ = mcint.integrate( self.interp,
+                                                    self.sampler(),
+                                                    measure=self.volume(),
+                                                    n=200000 )
 
 
         # Normalized estimated probability density
         self.pdf = self.pdf / self.integral
 
+
         # combine estimated prob with data into Nx(D+1) array [x_i, p_hat(x_i)]
         self.pX = np.append(self.x, self.pdf.reshape((self.N,1)), axis=1)
-
 
 
 
@@ -216,7 +195,7 @@ class MCDensityEstimator(object):
         while True:
             gen_list = list()
             for i in range(self.D):
-                r = random.uniform( self.x.T[i].min(), self.x.T[i].max() )
+                r = random.uniform( self.x.T[i].min()-self.vol_ext*self.bw, self.x.T[i].max()+self.vol_ext*self.bw)
                 gen_list.append(r)
             yield (gen_list)
 
@@ -224,12 +203,16 @@ class MCDensityEstimator(object):
     def volume( self ):
         vol = 1.0
         for i in range(self.D):
-            vol = vol * ( self.x.T[i].max() - self.x.T[i].min() )
+            vol = vol * ( self.x.T[i].max() + 2*self.vol_ext*self.bw - self.x.T[i].min() )
         return( vol )
 
 
     # the estimator can be used to evaluate the probability in new points
     # through evaluate_pdf
+    # the interpolation can either be linear/nearest or extended with KDE
     def evaluate_pdf( self, query ):
-        py = self.interp.__call__(query)/self.integral
-        return(py)
+        if self.interpolation_method=='kde':         
+            py = (self.prob_kde(query)-self.trasl())*np.heaviside(self.prob_kde(query)-self.trasl(),0)/ self.integral
+        else:
+            py = self.interp.__call__(query)/self.integral
+        return(py)    
