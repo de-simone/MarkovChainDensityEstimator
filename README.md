@@ -2,7 +2,7 @@
 
 MCDE is a novel way to estimate the PDF of a distribution based on the properties of Markov Chains. This estimator can be seen as a modified version of Kernel Density Estimation (KDE) as well. More details can be found on [20xx.xxxx](https://arxiv.org/)
 
-All data science tasks that have a density based approach can be tackled using this estimator. We have showed that local anomaly detection based on MCDE works in a very satisfying way. We have also showed that this density estimator can perform better than KDE for a large enough sample.
+All data science tasks that have a density based approach can be tackled using this estimator. We have showed that local anomaly detection based on MCDE is very effective. We have also showed that this density estimator can perform better than KDE for a large enough sample.
 
 ### Installation
 
